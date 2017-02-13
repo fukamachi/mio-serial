@@ -7,14 +7,12 @@
 //! ## Links
 //!   - repo:  https://github.com/berkowski/mio-serial
 //!   - docs:  https://docs.rs/mio-serial
-#![cfg(unix)]
 #![deny(missing_docs)]
 
 extern crate serialport;
 extern crate mio;
-
-#[cfg(unix)]
 extern crate libc;
+
 #[cfg(unix)]
 extern crate termios;
 
@@ -47,3 +45,6 @@ mod windows;
 
 #[cfg(unix)]
 pub use unix::Serial;
+
+#[cfg(windows)]
+pub use windows::Serial;

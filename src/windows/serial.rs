@@ -1,38 +1,97 @@
+extern crate lazycell;
+extern crate core;
+
 use std::os::windows::prelude::*;
 use std::io;
 use std::path::Path;
 use std::convert::AsRef;
-
-use serialport::windows::COMport;
-
-pub fn from_path<T: AsRef<Path>>(path: T, settings: &::SerialPortSettings) -> io::Result<::Serial> {
-
-
-}
-
-use std::os::windows::prelude::*;
-use std::io::{self, Read, Write};
-use std::path::Path;
-use std::convert::AsRef;
 use std::time::Duration;
+use std::thread;
+use std::ptr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use libc;
-use mio::{Evented, PollOpt, Token, Poll, Ready};
-use mio::unix::EventedFd;
+use mio::{Evented, PollOpt, Token, Poll, Ready, Registration, SetReadiness};
 
 use serialport;
 use serialport::windows::COMPort;
 use serialport::prelude::*;
+use self::lazycell::{LazyCell, AtomicLazyCell};
 
-pub struct Serial {
-    inner: serialport::windows::COMPort,
+use super::ffi::*;
+
+struct SerialCtl {
+    registration: LazyCell<Registration>,
+    set_readiness: AtomicLazyCell<SetReadiness>,
+    pending: AtomicUsize,
 }
 
+/// Windows serial port
+pub struct Serial {
+    inner: Arc<serialport::windows::COMPort>,
+    ctl: Arc<SerialCtl>,
+}
+
+unsafe impl core::marker::Send for Serial { }
+
 impl Serial {
+    /// Open a nonblocking serial port from the provided path.
     pub fn from_path<T: AsRef<Path>>(path: T, settings: &SerialPortSettings) -> io::Result<Self> {
-        COMPort.open(path.as_ref(), settings)
-            .map(|port| ::Serial { inner: port })
-            .map_err(|_| Err(io::Error::last_os_error))
+        let port = COMPort::open(path.as_ref(), settings)?;
+        Serial::from_serial(port)
+    }
+
+    /// Convert an existing `serialport::windows::COMPort` struct.
+    pub fn from_serial(port: COMPort) -> io::Result<Self> {
+        let ctl = SerialCtl {
+            registration: LazyCell::new(),
+            set_readiness: AtomicLazyCell::new(),
+            pending: AtomicUsize::new(0),
+        };
+
+        let serial = Serial {
+            inner: Arc::new(port),
+            ctl: Arc::new(ctl),
+        };
+
+        {
+            let serial = serial.clone();
+            thread::spawn(move || {
+                let evt = &mut EV_RXCHAR;
+                loop {
+                    let res = unsafe { WaitCommEvent(serial.inner.as_raw_handle(), evt, ptr::null_mut()) };
+                    match res as u32 {
+                        EV_RXCHAR => serial.ctl.make_readable().unwrap(),
+                        _ => unreachable!()
+                    }
+                }
+            });
+        }
+
+        Ok(serial)
+    }
+}
+
+impl SerialCtl {
+    fn make_readable(&self) -> io::Result<()> {
+        let cnt = self.pending.fetch_add(1, Ordering::Acquire);
+
+        if cnt == 0 {
+            if let Some(set_readiness) = self.set_readiness.borrow() {
+                try!(set_readiness.set_readiness(Ready::readable()));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Clone for Serial {
+    fn clone(&self) -> Self {
+        Serial {
+            inner: self.inner.clone(),
+            ctl: self.ctl.clone()
+        }
     }
 }
 
@@ -40,6 +99,11 @@ impl SerialPort for Serial {
     /// Returns a struct with the current port settings
     fn settings(&self) -> SerialPortSettings {
         self.inner.settings()
+    }
+
+    /// Return the name associated with the serial port, if known.
+    fn port_name(&self) -> Option<String> {
+        self.inner.port_name()
     }
 
     /// Returns the current baud rate.
@@ -101,7 +165,8 @@ impl SerialPort for Serial {
     /// a single call into the driver, though that may be done on some
     /// platforms.
     fn set_all(&mut self, settings: &SerialPortSettings) -> serialport::Result<()> {
-        self.inner.set_all(settings)
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.set_all(settings)
     }
 
     /// Sets the baud rate.
@@ -112,27 +177,32 @@ impl SerialPort for Serial {
     /// `InvalidInput` error. Even if the baud rate is accepted by `set_baud_rate()`, it may not be
     /// supported by the underlying hardware.
     fn set_baud_rate(&mut self, baud_rate: ::BaudRate) -> serialport::Result<()> {
-        self.inner.set_baud_rate(baud_rate)
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.set_baud_rate(baud_rate)
     }
 
     /// Sets the character size.
     fn set_data_bits(&mut self, data_bits: ::DataBits) -> serialport::Result<()> {
-        self.inner.set_data_bits(data_bits)
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.set_data_bits(data_bits)
     }
 
     /// Sets the flow control mode.
     fn set_flow_control(&mut self, flow_control: ::FlowControl) -> serialport::Result<()> {
-        self.inner.set_flow_control(flow_control)
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.set_flow_control(flow_control)
     }
 
     /// Sets the parity-checking mode.
     fn set_parity(&mut self, parity: ::Parity) -> serialport::Result<()> {
-        self.inner.set_parity(parity)
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.set_parity(parity)
     }
 
     /// Sets the number of stop bits.
     fn set_stop_bits(&mut self, stop_bits: ::StopBits) -> serialport::Result<()> {
-        self.inner.set_stop_bits(stop_bits)
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.set_stop_bits(stop_bits)
     }
 
     /// Sets the timeout for future I/O operations.  This parameter is ignored but
@@ -155,7 +225,8 @@ impl SerialPort for Serial {
     /// * `NoDevice` if the device was disconnected.
     /// * `Io` for any other type of I/O error.
     fn write_request_to_send(&mut self, level: bool) -> serialport::Result<()> {
-        self.inner.write_request_to_send(level)
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.write_request_to_send(level)
     }
 
     /// Writes to the Data Terminal Ready pin
@@ -170,7 +241,8 @@ impl SerialPort for Serial {
     /// * `NoDevice` if the device was disconnected.
     /// * `Io` for any other type of I/O error.
     fn write_data_terminal_ready(&mut self, level: bool) -> serialport::Result<()> {
-        self.inner.write_data_terminal_ready(level)
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.write_data_terminal_ready(level)
     }
 
     // Functions for reading additional pins
@@ -187,7 +259,8 @@ impl SerialPort for Serial {
     /// * `NoDevice` if the device was disconnected.
     /// * `Io` for any other type of I/O error.
     fn read_clear_to_send(&mut self) -> serialport::Result<bool> {
-        self.inner.read_clear_to_send()
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.read_clear_to_send()
     }
 
     /// Reads the state of the Data Set Ready control signal.
@@ -202,7 +275,8 @@ impl SerialPort for Serial {
     /// * `NoDevice` if the device was disconnected.
     /// * `Io` for any other type of I/O error.
     fn read_data_set_ready(&mut self) -> serialport::Result<bool> {
-        self.inner.read_data_set_ready()
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.read_data_set_ready()
     }
 
     /// Reads the state of the Ring Indicator control signal.
@@ -217,7 +291,8 @@ impl SerialPort for Serial {
     /// * `NoDevice` if the device was disconnected.
     /// * `Io` for any other type of I/O error.
     fn read_ring_indicator(&mut self) -> serialport::Result<bool> {
-        self.inner.read_ring_indicator()
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.read_ring_indicator()
     }
 
     /// Reads the state of the Carrier Detect control signal.
@@ -232,43 +307,33 @@ impl SerialPort for Serial {
     /// * `NoDevice` if the device was disconnected.
     /// * `Io` for any other type of I/O error.
     fn read_carrier_detect(&mut self) -> serialport::Result<bool> {
-        self.inner.read_carrier_detect()
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.read_carrier_detect()
     }
 }
 
-impl Read for Serial {
+impl io::Read for Serial {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        match unsafe {
-            libc::read(self.as_raw_fd(),
-                       bytes.as_ptr() as *mut libc::c_void,
-                       bytes.len() as libc::size_t)
-        } {
-            x if x >= 0 => Ok(x as usize),
-            _ => Err(io::Error::last_os_error()),
-        }
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.read(bytes)
     }
 }
 
-impl Write for Serial {
+impl io::Write for Serial {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        match unsafe {
-            libc::write(self.as_raw_fd(),
-                        bytes.as_ptr() as *const libc::c_void,
-                        bytes.len() as libc::size_t)
-        } {
-            x if x >= 0 => Ok(x as usize),
-            _ => Err(io::Error::last_os_error()),
-        }
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.write(bytes)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
+        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.flush()
     }
 }
 
-impl AsRawFd for Serial {
-    fn as_raw_fd(&self) -> RawFd {
-        self.inner.as_raw_fd()
+impl AsRawHandle for Serial {
+    fn as_raw_handle(&self) -> RawHandle {
+        self.inner.as_raw_handle()
     }
 }
 
@@ -279,7 +344,7 @@ impl Evented for Serial {
                 interest: Ready,
                 opts: PollOpt)
                 -> io::Result<()> {
-        EventedFd(&self.as_raw_fd()).register(poll, token, interest, opts)
+        self.ctl.register(poll, token, interest, opts)
     }
 
     fn reregister(&self,
@@ -288,10 +353,44 @@ impl Evented for Serial {
                   interest: Ready,
                   opts: PollOpt)
                   -> io::Result<()> {
-        EventedFd(&self.as_raw_fd()).reregister(poll, token, interest, opts)
+        self.ctl.reregister(poll, token, interest, opts)
     }
 
     fn deregister(&self, poll: &Poll) -> io::Result<()> {
-        EventedFd(&self.as_raw_fd()).deregister(poll)
+        self.ctl.deregister(poll)
+    }
+}
+
+impl Evented for SerialCtl {
+    fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> io::Result<()> {
+        if self.registration.borrow().is_some() {
+            return Err(io::Error::new(io::ErrorKind::Other, "receiver already registered"));
+        }
+
+        let (registration, set_readiness) = Registration::new(poll, token, interest, opts);
+
+        if self.pending.load(Ordering::Relaxed) > 0 {
+            // It's already readable
+            let _ = set_readiness.set_readiness(Ready::readable());
+        }
+
+        self.registration.fill(registration).ok().expect("unexpected state encountered");
+        self.set_readiness.fill(set_readiness).ok().expect("unexpected state encountered");
+
+        Ok(())
+    }
+
+    fn reregister(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> io::Result<()> {
+        match self.registration.borrow() {
+            Some(registration) => registration.update(poll, token, interest, opts),
+            None => Err(io::Error::new(io::ErrorKind::Other, "receiver not registered")),
+        }
+    }
+
+    fn deregister(&self, poll: &Poll) -> io::Result<()> {
+        match self.registration.borrow() {
+            Some(registration) => registration.deregister(poll),
+            None => Err(io::Error::new(io::ErrorKind::Other, "receiver not registered")),
+        }
     }
 }
