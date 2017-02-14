@@ -8,6 +8,7 @@ use std::convert::AsRef;
 use std::time::Duration;
 use std::thread;
 use std::ptr;
+use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -57,7 +58,8 @@ impl Serial {
 
         {
             let ctl = ctl.clone();
-            let handle = HandleWrapper { inner: port.as_raw_handle() };
+            let handle: HANDLE = unsafe { mem::transmute(port.as_raw_handle()) };
+            let handle = HandleWrapper { inner: handle };
             thread::spawn(move || {
                 let evt = &mut EV_RXCHAR;
                 loop {

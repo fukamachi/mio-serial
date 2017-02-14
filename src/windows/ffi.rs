@@ -9,7 +9,7 @@ pub type DWORD = libc::c_ulong;
 pub type LPDWORD = *mut DWORD;
 pub type LPVOID = *mut libc::c_void;
 
-pub type HANDLE = *mut os::raw::c_void;
+pub type HANDLE = *mut LPVOID;
 
 pub const EV_RXCHAR: DWORD = 0x0001;
 pub const EV_RXFLAG: DWORD = 0x0002;
