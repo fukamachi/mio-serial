@@ -315,7 +315,11 @@ impl SerialPort for Serial {
 impl io::Read for Serial {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.read(bytes)
+        let res = inner.read(bytes);
+        if let Some(set_readiness) = self.ctl.set_readiness.borrow() {
+            try!(set_readiness.set_readiness(Ready::none()));
+        }
+        res
     }
 }
 
