@@ -61,11 +61,13 @@ impl Serial {
             thread::spawn(move || {
                 let evt = &mut EV_RXCHAR;
                 loop {
+                    /*
                     let res = unsafe { WaitCommEvent(handle.inner, evt, ptr::null_mut()) };
                     match res as u32 {
                         EV_RXCHAR => ctl.make_readable().unwrap(),
                         _ => { /* ignore */ }
                     }
+                    */
                 }
             });
         }
