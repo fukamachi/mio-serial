@@ -58,11 +58,11 @@ impl Serial {
             let serial = serial.clone();
             thread::spawn(move || {
                 let evt = &mut EV_RXCHAR;
+                let raw_handle = {
+                    let inner = serial.inner.lock().unwrap();
+                    inner.as_raw_handle()
+                };
                 loop {
-                    let raw_handle = {
-                        let inner = serial.inner.lock().unwrap();
-                        inner.as_raw_handle()
-                    };
                     let res = unsafe { WaitCommEvent(raw_handle, evt, ptr::null_mut()) };
                     match res as u32 {
                         EV_RXCHAR => serial.ctl.make_readable().unwrap(),
