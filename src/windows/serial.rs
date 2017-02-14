@@ -28,11 +28,17 @@ struct SerialCtl {
 
 /// Windows serial port
 pub struct Serial {
-    inner: Arc<serialport::windows::COMPort>,
+    inner: serialport::windows::COMPort,
     ctl: Arc<SerialCtl>,
 }
 
-unsafe impl core::marker::Send for Serial { }
+pub struct HandleWrapper {
+    inner: HANDLE
+}
+
+unsafe impl core::marker::Sync for SerialCtl { }
+unsafe impl core::marker::Send for HandleWrapper { }
+unsafe impl core::marker::Sync for HandleWrapper { }
 
 impl Serial {
     /// Open a nonblocking serial port from the provided path.
@@ -43,30 +49,31 @@ impl Serial {
 
     /// Convert an existing `serialport::windows::COMPort` struct.
     pub fn from_serial(port: COMPort) -> io::Result<Self> {
-        let ctl = SerialCtl {
+        let ctl = Arc::new(SerialCtl {
             registration: LazyCell::new(),
             set_readiness: AtomicLazyCell::new(),
             pending: AtomicUsize::new(0),
-        };
-
-        let serial = Serial {
-            inner: Arc::new(port),
-            ctl: Arc::new(ctl),
-        };
+        });
 
         {
-            let serial = serial.clone();
+            let ctl = ctl.clone();
+            let handle = HandleWrapper { inner: port.as_raw_handle() };
             thread::spawn(move || {
                 let evt = &mut EV_RXCHAR;
                 loop {
-                    let res = unsafe { WaitCommEvent(serial.inner.as_raw_handle(), evt, ptr::null_mut()) };
+                    let res = unsafe { WaitCommEvent(handle.inner, evt, ptr::null_mut()) };
                     match res as u32 {
-                        EV_RXCHAR => serial.ctl.make_readable().unwrap(),
+                        EV_RXCHAR => ctl.make_readable().unwrap(),
                         _ => { /* ignore */ }
                     }
                 }
             });
         }
+
+        let serial = Serial {
+            inner: port,
+            ctl: ctl,
+        };
 
         Ok(serial)
     }
@@ -83,15 +90,6 @@ impl SerialCtl {
         }
 
         Ok(())
-    }
-}
-
-impl Clone for Serial {
-    fn clone(&self) -> Self {
-        Serial {
-            inner: self.inner.clone(),
-            ctl: self.ctl.clone()
-        }
     }
 }
 
@@ -165,8 +163,7 @@ impl SerialPort for Serial {
     /// a single call into the driver, though that may be done on some
     /// platforms.
     fn set_all(&mut self, settings: &SerialPortSettings) -> serialport::Result<()> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.set_all(settings)
+        self.inner.set_all(settings)
     }
 
     /// Sets the baud rate.
@@ -177,32 +174,27 @@ impl SerialPort for Serial {
     /// `InvalidInput` error. Even if the baud rate is accepted by `set_baud_rate()`, it may not be
     /// supported by the underlying hardware.
     fn set_baud_rate(&mut self, baud_rate: ::BaudRate) -> serialport::Result<()> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.set_baud_rate(baud_rate)
+        self.inner.set_baud_rate(baud_rate)
     }
 
     /// Sets the character size.
     fn set_data_bits(&mut self, data_bits: ::DataBits) -> serialport::Result<()> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.set_data_bits(data_bits)
+        self.inner.set_data_bits(data_bits)
     }
 
     /// Sets the flow control mode.
     fn set_flow_control(&mut self, flow_control: ::FlowControl) -> serialport::Result<()> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.set_flow_control(flow_control)
+        self.inner.set_flow_control(flow_control)
     }
 
     /// Sets the parity-checking mode.
     fn set_parity(&mut self, parity: ::Parity) -> serialport::Result<()> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.set_parity(parity)
+        self.inner.set_parity(parity)
     }
 
     /// Sets the number of stop bits.
     fn set_stop_bits(&mut self, stop_bits: ::StopBits) -> serialport::Result<()> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.set_stop_bits(stop_bits)
+        self.inner.set_stop_bits(stop_bits)
     }
 
     /// Sets the timeout for future I/O operations.  This parameter is ignored but
@@ -225,8 +217,7 @@ impl SerialPort for Serial {
     /// * `NoDevice` if the device was disconnected.
     /// * `Io` for any other type of I/O error.
     fn write_request_to_send(&mut self, level: bool) -> serialport::Result<()> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.write_request_to_send(level)
+        self.inner.write_request_to_send(level)
     }
 
     /// Writes to the Data Terminal Ready pin
@@ -241,8 +232,7 @@ impl SerialPort for Serial {
     /// * `NoDevice` if the device was disconnected.
     /// * `Io` for any other type of I/O error.
     fn write_data_terminal_ready(&mut self, level: bool) -> serialport::Result<()> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.write_data_terminal_ready(level)
+        self.inner.write_data_terminal_ready(level)
     }
 
     // Functions for reading additional pins
@@ -259,8 +249,7 @@ impl SerialPort for Serial {
     /// * `NoDevice` if the device was disconnected.
     /// * `Io` for any other type of I/O error.
     fn read_clear_to_send(&mut self) -> serialport::Result<bool> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.read_clear_to_send()
+        self.inner.read_clear_to_send()
     }
 
     /// Reads the state of the Data Set Ready control signal.
@@ -275,8 +264,7 @@ impl SerialPort for Serial {
     /// * `NoDevice` if the device was disconnected.
     /// * `Io` for any other type of I/O error.
     fn read_data_set_ready(&mut self) -> serialport::Result<bool> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.read_data_set_ready()
+        self.inner.read_data_set_ready()
     }
 
     /// Reads the state of the Ring Indicator control signal.
@@ -291,8 +279,7 @@ impl SerialPort for Serial {
     /// * `NoDevice` if the device was disconnected.
     /// * `Io` for any other type of I/O error.
     fn read_ring_indicator(&mut self) -> serialport::Result<bool> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.read_ring_indicator()
+        self.inner.read_ring_indicator()
     }
 
     /// Reads the state of the Carrier Detect control signal.
@@ -307,15 +294,13 @@ impl SerialPort for Serial {
     /// * `NoDevice` if the device was disconnected.
     /// * `Io` for any other type of I/O error.
     fn read_carrier_detect(&mut self) -> serialport::Result<bool> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.read_carrier_detect()
+        self.inner.read_carrier_detect()
     }
 }
 
 impl io::Read for Serial {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        let res = inner.read(bytes);
+        let res = self.inner.read(bytes);
         if let Some(set_readiness) = self.ctl.set_readiness.borrow() {
             try!(set_readiness.set_readiness(Ready::none()));
         }
@@ -325,13 +310,11 @@ impl io::Read for Serial {
 
 impl io::Write for Serial {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.write(bytes)
+        self.inner.write(bytes)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let mut inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.flush()
+        self.inner.flush()
     }
 }
 
