@@ -66,7 +66,7 @@ impl Serial {
                     let res = unsafe { WaitCommEvent(raw_handle, evt, ptr::null_mut()) };
                     match res as u32 {
                         EV_RXCHAR => serial.ctl.make_readable().unwrap(),
-                        _ => unreachable!()
+                        _ => { /* ignore */ }
                     }
                 }
             });
